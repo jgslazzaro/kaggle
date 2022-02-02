@@ -1,0 +1,331 @@
+---
+title: House_prices
+author: Joao Lazzaro
+output: github_document #html_document
+---
+
+I created this notebook to understand how Kaggle works. It estimates a simple Lasso
+model to predict house prices in the 
+[Kaggle house prices competition](https://www.kaggle.com/c/house-prices-advanced-regression-techniques).
+
+### HOUSEKEEPING
+```{r, message = FALSE, hide = TRUE, warning = FALSE, tidy = TRUE}
+setwd("C:\\Users\\jgsla\\OneDrive\\kaggle\\house_prices")
+library(lubridate)
+library(ggplot2)
+library(corrplot)
+library(Amelia)
+library(GGally)
+library(corrr)
+library(tidymodels)
+library(recipeselectors)
+library(tidyverse)
+library(patchwork)
+```
+
+### Load Data
+
+```{r, warning=FALSE, tidy = TRUE}
+training <- tibble(read.csv("data\\train.csv"))
+test <- tibble(read.csv("data\\test.csv")) %>%
+  mutate(SalePrice = 0)
+```
+# Data Cleaning
+
+##### Checking for missing 
+
+```{r, warning=FALSE, tidy = TRUE, echo = FALSE}
+missmap(training, col = c("red", "black"), y.at = 1,
+    y.labels = "", legend = TRUE)
+```
+Dropping the variables with more than 15% missing.
+```{r, warning=FALSE, tidy = TRUE}
+training <- training %>%
+    select(which(colMeans(is.na(training)) < 0.3))
+test <- test %>%
+    select(names(training))
+```
+
+```{r, warning=FALSE, tidy = TRUE, echo = FALSE}
+missmap(training, col = c("red", "black"), y.at = 1,
+    y.labels = "", legend = TRUE)
+```
+
+Transform into dummies, when applicable
+
+```{r, warning=FALSE, tidy = TRUE}
+rp <- recipe(SalePrice ~ ., data = training) %>%
+    update_role(Id, new_role = "ID") %>%
+    step_dummy(all_nominal(), -all_outcomes()) %>%
+    prep(training = training)
+ 
+
+training <- bake(rp, new_data = training)
+test <- bake(rp, new_data = test)
+``` 
+
+### Exploratory Data Analysis
+
+Distribution of some numerical variables
+
+```{r, warning=FALSE, tidy = TRUE, echo = FALSE}
+p1 <- training %>%
+  ggplot(aes(SalePrice)) +
+  stat_density() +
+  theme_grey()
+p2 <- training %>%
+  ggplot(aes(LotArea)) +
+  stat_density() +
+  theme_grey()
+p3 <- training %>%
+  ggplot(aes(YearBuilt)) +
+  stat_density() +
+  theme_grey()
+p4 <- training %>%
+  ggplot(aes(YearRemodAdd)) +
+  stat_density() +
+  theme_grey()
+p7 <- training %>%
+  ggplot(aes(TotalBsmtSF)) +
+  stat_density() +
+  theme_grey()
+p5 <- training %>%
+  ggplot(aes(BedroomAbvGr)) +
+  geom_histogram(bins = 9) +
+  theme_grey()
+  p6 <- training %>%
+  ggplot(aes(LotFrontage)) +
+  stat_density() +
+  theme_grey()
+p1 + p2 + p3 + p4 + p6 + p7 + p5
+```
+
+
+SalePrice, LotArea, LotFrontage and TotalBsmtSF are right skewed, let's see with log transformation:
+```{r, warning=FALSE, tidy = TRUE, echo = FALSE}
+p1 <- training %>%
+  ggplot(aes(log(SalePrice))) +
+  stat_density() +
+  theme_grey()
+p2 <- training %>%
+  ggplot(aes(log(LotArea))) +
+  stat_density() +
+  theme_grey()
+p3 <- training %>%
+  ggplot(aes(log(YearBuilt))) +
+  stat_density() +
+  theme_grey()
+p4 <- training %>%
+  ggplot(aes(log(TotalBsmtSF))) +
+  stat_density() +
+  theme_grey()
+p5 <- training %>%
+  ggplot(aes(log(LotFrontage))) +
+  stat_density() +
+  theme_grey()
+p1 + p2 + p5 +p4
+
+```
+
+So I'll transform them to log
+
+```{r, warning=FALSE, tidy = TRUE}
+training <- training %>%
+    mutate(SalePrice = log(SalePrice),
+      LotArea = log(LotArea),
+      LotFrontage = log(LotFrontage),
+      TotalBsmtSF = log(TotalBsmtSF))
+test <- test %>%
+    mutate(LotArea = log(LotArea),TotalBsmtSF = log(TotalBsmtSF),
+    LotFrontage = log(LotFrontage))
+```
+
+Let's check the relationship of SalePrice with these numerical variables
+
+```{r, warning=FALSE, tidy = TRUE, echo = FALSE}
+training %>%
+    select(SalePrice, LotArea, LotFrontage, YearBuilt,YearRemodAdd, BedroomAbvGr,TotalBsmtSF) %>% 
+    pivot_longer(cols = c(LotArea, LotFrontage, YearBuilt,YearRemodAdd, BedroomAbvGr,TotalBsmtSF ), 
+                      names_to = "predictor", values_to = "value") %>% 
+  ggplot(aes(x = value, SalePrice)) +
+  geom_point(alpha = .2) + 
+  geom_smooth(color="red") +
+  geom_smooth(method='lm',color='yellow') +
+  facet_wrap(~ predictor, scales = "free_x")
+```
+
+The linear model seems a good candidate and there seems to be a quadratic relationship
+with the year built. Let's add a quadratic term.
+
+```{r}
+training <- training %>%
+    mutate(YearBuilt2 = YearBuilt^2)
+test <- test %>%
+    mutate(YearBuilt2 = YearBuilt^2)
+```
+
+#### Correlations
+
+Matrix:
+
+```{r, warning=FALSE, tidy = TRUE, echo = FALSE}
+recipe(SalePrice ~ ., data = training) %>%
+    update_role(Id, new_role = "ID") %>%
+    step_dummy(all_nominal()) %>%
+    step_impute_mean(all_numeric()) %>%
+    prep() %>%
+    juice() %>%
+    correlate() %>%
+    shave() %>%
+    rplot()
+```
+
+Numbers of the 10 first:
+
+```{r, warning=FALSE, tidy = TRUE}
+recipe(SalePrice ~ ., data = training) %>%
+    update_role(Id, new_role = "ID") %>%
+    step_dummy(all_nominal()) %>%
+    step_impute_mean(all_numeric()) %>%
+    prep() %>%
+    juice() %>%
+    correlate() %>%
+    select(c(1:10)) %>%
+    head(10) %>%
+    shave() %>%
+    fashion()
+```
+
+Correlations histogram:
+
+```{r, warning=FALSE, tidy = TRUE, echo = FALSE}
+recipe(SalePrice ~ ., data = training) %>%
+    update_role(Id, new_role = "ID") %>%
+    step_dummy(all_nominal()) %>%
+    step_impute_mean(all_numeric()) %>%
+    prep() %>%
+    juice() %>%
+    correlate() %>%
+    pivot_longer(-term) %>%
+    filter(term > name) %>%
+    drop_na() %>%
+    arrange(desc(abs(value))) %>%
+    ggplot(aes(x = value)) +
+    geom_histogram(color = "white") +
+    scale_x_continuous()
+```
+
+There is low correlations between most predictors
+
+### Finding the best Lasso regression
+
+
+1 - Defining the model
+
+```{r, warning=FALSE, tidy = TRUE}
+rp <- recipe(SalePrice ~ ., data = training) %>%
+    update_role(Id, new_role = "ID")
+model <- linear_reg(penalty = tune()) %>%
+    set_engine("glmnet")
+wf <- workflow() %>%
+    add_recipe(rp) %>%
+    add_model(model)
+```
+
+2 - Defining hyperparameters with a coarse grid
+
+```{r, warning=FALSE, tidy = TRUE}
+params <- parameters(wf)
+grid <- tibble(penalty = seq(0, 1, by = 0.1))   #grid_random(params, size = 10)
+grid
+```
+
+3 - Define training/validadtion data size 
+
+```{r, warning=FALSE, tidy = TRUE}
+cv_splits <- vfold_cv(training, v = 10, strata = SalePrice)
+```
+
+4 - Train the model
+
+```{r, warning=FALSE, tidy = TRUE}
+res <- wf %>% tune_grid(resamples = cv_splits, grid = grid)
+```
+
+5 - RMSE plots:
+
+```{r, warning=FALSE, tidy = TRUE}
+autoplot(res, metric = "rmse") +
+    xlim(0,1)
+```
+
+Note that the RMSE seems to be increasing in the regularization 
+parameter for larger values. Lets do it again with a finer grid in between the points we already know: $0, 0.3$ .
+
+```{r, warning=FALSE, tidy = TRUE}
+grid <- tibble(penalty = seq(0, 0.3, by = 0.001))   #grid_random(params, size = 10)
+res <- wf %>% tune_grid(resamples = cv_splits, grid = grid)
+autoplot(res, metric = "rmse") +
+    xlim(0,0.3)
+```
+
+Now we see that there is a minimum, we can try an even finer grid
+
+```{r, warning=FALSE, tidy = TRUE}
+grid <- tibble(penalty = seq(0, 0.1, by = 0.0001))   #grid_random(params, size = 10)
+res <- wf %>% tune_grid(resamples = cv_splits, grid = grid)
+autoplot(res, metric = "rmse") +
+    xlim(0, 0.1)
+```
+
+6 - Select the best model
+
+```{r, warning=FALSE, tidy = TRUE}
+res %>% show_best("rmse", metric = "rmse")
+```
+7 - Fit the best model to the training data and calculate the RMSE
+```{r, warning=FALSE, tidy = TRUE}
+final_wf <-
+  wf %>%
+  finalize_workflow(select_best(res, metric = "rmse"))
+final_fit <-
+  final_wf %>%
+  fit(training)
+rmse(training, training$SalePrice, predict(final_fit, training)$.pred)
+```
+```{r, warning=FALSE, tidy = TRUE}
+training %>%
+    mutate(pred = predict(final_fit, training)$.pred, residuals = SalePrice - pred) %>%
+    select(SalePrice, pred) %>%
+    pivot_longer(cols = c(pred),
+                      names_to = "predictor", values_to = "value") %>%
+  ggplot(aes(x = value, SalePrice)) +
+  geom_point(alpha = .2) + 
+#  geom_smooth(color="red") +
+  geom_smooth(method='lm',color='yellow') +
+  facet_wrap(~ predictor, scales = "free_x")
+```
+
+```{r, warning=FALSE, tidy = TRUE}
+rp2 <- recipe(training) %>%
+  step_impute_knn(all_numeric()) %>%
+  prep()
+training2 <- rp2 %>% bake(training)
+rmse(training2, training2$SalePrice, predict(final_fit, training2)$.pred)
+```
+
+8 - Fit the model to the test data, but first input knn on missing
+
+```{r, warning=FALSE, tidy = TRUE}
+test <- rp2 %>%
+  bake(test)
+
+test_pred <- exp(predict(final_fit, test))
+```
+
+9 - Save into csv 
+
+```{r, warning=FALSE, tidy = TRUE}
+tibble(Id = test$Id, SalePrice = test_pred$.pred) %>%
+    write_csv(file = "submission_JoaoLazzaro.csv", na = "")
+```
